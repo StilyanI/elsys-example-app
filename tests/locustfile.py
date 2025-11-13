@@ -21,7 +21,7 @@ class FileStorageUser(HttpUser):
     @task(2)
     def post_file(self):
         fname = "locust_" + "".join(random.choices(string.ascii_lowercase, k=5)) + ".txt"
-        content = b"Hello Locust " + bytes(random.choices(string.ascii_letters, k=20))
+        content = b"Hello Locust " + "".join(random.choices(string.ascii_letters, k=20)).encode("utf-8")
         files = {"file": (fname, io.BytesIO(content), "text/plain")}
         with self.client.post("/files", files=files, name="POST /files") as resp:
             if resp.status_code != 200:
@@ -30,6 +30,7 @@ class FileStorageUser(HttpUser):
                 json = resp.json()
                 self.uploaded_filename = json.get("filename")
                 resp.success()
+
 
     @task(2)
     def get_files_list(self):
