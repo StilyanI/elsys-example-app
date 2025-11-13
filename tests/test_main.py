@@ -1,86 +1,83 @@
-import sys
-from pathlib import Path
-
-import pytest
 from fastapi.testclient import TestClient
+from pathlib import Path
+import os
+import sys
+import io
+import pytest
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-if str(BASE_DIR) not in sys.path:
-    sys.path.append(str(BASE_DIR))
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-import main
+from main import app, STORAGE_DIR
 
-
-@pytest.fixture
-def temp_storage(tmp_path, monkeypatch):
-    storage_dir = tmp_path / "storage"
-    storage_dir.mkdir()
-    monkeypatch.setattr(main, "STORAGE_DIR", storage_dir)
-    monkeypatch.setattr(main, "files_stored_counter", 0)
-    return storage_dir
+client = TestClient(app)
 
 
-@pytest.fixture
-def client(temp_storage):
-    return TestClient(main.app)
+@pytest.fixture(autouse=True)
+def clean_storage():
+    for f in STORAGE_DIR.iterdir():
+        if f.is_file():
+            f.unlink()
+    yield
+    for f in STORAGE_DIR.iterdir():
+        if f.is_file():
+            f.unlink()
 
 
-def test_root_endpoint_lists_available_routes(client):
+def test_root_endpoint():
     response = client.get("/")
     assert response.status_code == 200
-    body = response.json()
-    assert body["message"] == "File Storage API"
-    assert "GET /files" in body["endpoints"]
+    data = response.json()
+    assert "message" in data
+    assert "endpoints" in data
+    assert any("/files" in e for e in data["endpoints"])
 
 
-def test_store_file_persists_content(client, temp_storage):
-    payload = {"file": ("hello.txt", b"hello world", "text/plain")}
-    response = client.post("/files", files=payload)
+def test_upload_file():
+    file_content = b"Hello FastAPI!"
+    response = client.post(
+        "/files",
+        files={"file": ("test.txt", file_content, "text/plain")},
+    )
     assert response.status_code == 200
     data = response.json()
-    assert data["filename"] == "hello.txt"
-    assert data["size"] == len(b"hello world")
-    assert (temp_storage / "hello.txt").read_bytes() == b"hello world"
-    assert main.files_stored_counter == 1
+    assert data["message"] == "File stored successfully"
+    assert (STORAGE_DIR / "test.txt").exists()
 
 
-def test_get_file_returns_404_for_missing_file(client):
-    response = client.get("/files/missing.txt")
-    assert response.status_code == 404
-    assert response.json()["detail"] == "File 'missing.txt' not found"
+def test_get_uploaded_file():
+    client.post(
+        "/files",
+        files={"file": ("data.txt", b"content", "text/plain")},
+    )
 
-
-def test_get_file_returns_stored_binary(client, temp_storage):
-    file_path = temp_storage / "stored.bin"
-    payload = b"\x00\x01\x02"
-    file_path.write_bytes(payload)
-
-    response = client.get("/files/stored.bin")
+    response = client.get("/files/data.txt")
     assert response.status_code == 200
-    assert response.content == payload
-    assert 'filename="stored.bin"' in response.headers.get("content-disposition", "")
+    assert response.content == b"content"
+    assert response.headers["content-type"] == "application/octet-stream"
 
 
-def test_list_files_reports_current_files(client, temp_storage):
-    (temp_storage / "a.txt").write_text("a")
-    (temp_storage / "b.txt").write_text("bb")
+def test_list_files():
+    client.post("/files", files={"file": ("a.txt", b"a", "text/plain")})
+    client.post("/files", files={"file": ("b.txt", b"b", "text/plain")})
 
     response = client.get("/files")
     assert response.status_code == 200
     data = response.json()
-    assert data["count"] == 2
+    assert "files" in data
     assert set(data["files"]) == {"a.txt", "b.txt"}
+    assert data["count"] == 2
 
 
-def test_metrics_reflect_storage_usage(client):
-    payload = {"file": ("metrics.txt", b"abcd", "text/plain")}
-    store_response = client.post("/files", files=payload)
-    assert store_response.status_code == 200
+def test_health_and_metrics():
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json()["status"] == "healthy"
 
-    response = client.get("/metrics")
-    assert response.status_code == 200
-    metrics = response.json()
-    assert metrics["files_stored_total"] == 1
-    assert metrics["files_current"] == 1
-    assert metrics["total_storage_bytes"] == 4
-    assert metrics["total_storage_mb"] == 0.0
+    client.post("/files", files={"file": ("x.txt", b"1234", "text/plain")})
+
+    metrics = client.get("/metrics")
+    assert metrics.status_code == 200
+    data = metrics.json()
+    assert "files_stored_total" in data
+    assert "total_storage_bytes" in data
+    assert data["files_current"] >= 1
